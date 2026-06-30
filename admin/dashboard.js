@@ -41,6 +41,61 @@ function save() {
   window.CMArchive.saveContent(content);
 }
 
+/**
+ * Read a File object and return a Base64 data URL promise.
+ * Also warns if the file is very large (> 1 MB).
+ */
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    if (file.size > 5 * 1024 * 1024) {
+      showToast("Warning: File is over 5 MB — may slow storage", "error");
+    }
+    const reader = new FileReader();
+    reader.onload  = (e) => resolve(e.target.result);
+    reader.onerror = ()  => reject(new Error("Could not read file"));
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * Wire up a file-picker input to update a URL input + preview
+ * @param {string} pickerId   - id of the <input type="file">
+ * @param {string} urlId      - id of the <input type="url"> to update
+ * @param {string} previewId  - id of the <img> preview element
+ */
+function wireFilePicker(pickerId, urlId, previewId) {
+  const picker  = document.getElementById(pickerId);
+  const urlInput = document.getElementById(urlId);
+  const preview  = document.getElementById(previewId);
+  if (!picker) return;
+
+  picker.addEventListener("change", async () => {
+    const file = picker.files[0];
+    if (!file) return;
+    try {
+      showToast("Reading file...", "success");
+      const dataUrl = await readFileAsBase64(file);
+      urlInput.value = dataUrl;
+      if (preview) {
+        preview.src    = dataUrl;
+        preview.hidden = false;
+      }
+      showToast("File loaded! Click Save to store it.", "success");
+    } catch (err) {
+      showToast("Could not read file: " + err.message, "error");
+    }
+  });
+
+  // Also update preview when URL is typed manually
+  if (urlInput && preview) {
+    urlInput.addEventListener("input", () => {
+      const val = urlInput.value.trim();
+      if (val) { preview.src = val; preview.hidden = false; }
+      else { preview.hidden = true; }
+    });
+  }
+}
+
 /* ═══════════════════════════════════════
    AUTH
 ═══════════════════════════════════════ */
@@ -247,8 +302,40 @@ document.getElementById("addImageBtn").addEventListener("click", () => {
 });
 
 function imageForm(data = {}) {
+  const hasSrc = data.src && data.src.length > 0;
   return `
-    <div class="field"><label>Image URL *</label><input type="url" id="f_src" value="${escHtml(data.src || '')}" placeholder="https://..."></div>
+    <div class="upload-tabs">
+      <button type="button" class="upload-tab active" data-tab="file">📁 Upload File</button>
+      <button type="button" class="upload-tab" data-tab="url">🔗 Paste URL</button>
+    </div>
+
+    <div class="upload-panel" id="tab-file">
+      <div class="field">
+        <label>Choose Image File</label>
+        <div class="file-drop-zone" id="dropZone">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="width:36px;height:36px;margin:0 auto;display:block;opacity:.4"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21,15 16,10 5,21"/></svg>
+          <p style="margin:8px 0 4px;color:var(--text-secondary)">Click to browse or drag &amp; drop</p>
+          <p style="font-size:.75rem;color:var(--text-muted)">JPG, PNG, GIF, WebP, SVG — max 5 MB</p>
+          <input type="file" id="f_filePicker" accept="image/*" style="position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%">
+        </div>
+      </div>
+    </div>
+
+    <div class="upload-panel" id="tab-url" style="display:none">
+      <div class="field">
+        <label>Image URL</label>
+        <input type="url" id="f_src" value="${escHtml(data.src && !data.src.startsWith('data:') ? data.src : '')}" placeholder="https://example.com/photo.jpg">
+      </div>
+    </div>
+
+    <div class="field" style="margin-top:4px">
+      <label>Preview</label>
+      <img id="f_preview" src="${hasSrc ? escHtml(data.src) : ''}" alt="Preview"
+        style="width:100%;max-height:200px;object-fit:contain;border-radius:8px;background:var(--bg-elevated);${hasSrc ? '' : 'display:none'}"
+        ${hasSrc ? '' : 'hidden'}>
+      <p id="f_previewEmpty" style="color:var(--text-muted);font-size:.82rem;${hasSrc ? 'display:none' : ''}">No image selected yet.</p>
+    </div>
+
     <div class="field"><label>Alt Text</label><input type="text" id="f_alt" value="${escHtml(data.alt || '')}" placeholder="Describe the image"></div>
     <div class="field"><label>Label / Album</label><input type="text" id="f_label" value="${escHtml(data.label || '')}" placeholder="e.g. Portrait, Campus, Institution"></div>
     <div class="field"><label>Caption</label><textarea id="f_caption" rows="2" placeholder="Caption shown on hover...">${escHtml(data.caption || '')}</textarea></div>
@@ -262,9 +349,72 @@ function imageForm(data = {}) {
   `;
 }
 
+/** Called right after imageForm HTML is injected into the modal */
+function initImageFormLogic() {
+  // Tab switching
+  document.querySelectorAll(".upload-tab").forEach(tab => {
+    tab.addEventListener("click", () => {
+      document.querySelectorAll(".upload-tab").forEach(t => t.classList.remove("active"));
+      tab.classList.add("active");
+      document.getElementById("tab-file").style.display = tab.dataset.tab === "file" ? "" : "none";
+      document.getElementById("tab-url").style.display  = tab.dataset.tab === "url"  ? "" : "none";
+    });
+  });
+
+  // File picker
+  const picker  = document.getElementById("f_filePicker");
+  const preview = document.getElementById("f_preview");
+  const empty   = document.getElementById("f_previewEmpty");
+
+  async function handleFile(file) {
+    if (!file || !file.type.startsWith("image/")) {
+      showToast("Please select an image file", "error"); return;
+    }
+    try {
+      showToast("Loading image...", "success");
+      const dataUrl = await readFileAsBase64(file);
+      // Store in a hidden field we'll read on collect
+      picker.dataset.base64 = dataUrl;
+      preview.src    = dataUrl;
+      preview.hidden = false;
+      if (empty) empty.style.display = "none";
+      showToast("Image ready — click Save!", "success");
+    } catch (e) {
+      showToast("Could not read file", "error");
+    }
+  }
+
+  picker.addEventListener("change", () => handleFile(picker.files[0]));
+
+  // Drag & drop
+  const dropZone = document.getElementById("dropZone");
+  dropZone.addEventListener("dragover", e => { e.preventDefault(); dropZone.classList.add("drag-over"); });
+  dropZone.addEventListener("dragleave", () => dropZone.classList.remove("drag-over"));
+  dropZone.addEventListener("drop", e => {
+    e.preventDefault();
+    dropZone.classList.remove("drag-over");
+    handleFile(e.dataTransfer.files[0]);
+  });
+
+  // URL input live preview
+  const urlInput = document.getElementById("f_src");
+  if (urlInput) {
+    urlInput.addEventListener("input", () => {
+      const val = urlInput.value.trim();
+      if (val) { preview.src = val; preview.hidden = false; if (empty) empty.style.display = "none"; }
+      else     { preview.hidden = true; if (empty) empty.style.display = ""; }
+    });
+  }
+}
+
 function collectImage() {
-  const src = document.getElementById("f_src").value.trim();
-  if (!src) { showToast("Image URL is required", "error"); return null; }
+  const picker   = document.getElementById("f_filePicker");
+  const urlInput = document.getElementById("f_src");
+  const base64   = picker ? picker.dataset.base64 : null;
+  const url      = urlInput ? urlInput.value.trim() : "";
+  const src      = base64 || url;   // prefer file upload over URL
+
+  if (!src) { showToast("Please upload an image or paste a URL", "error"); return null; }
   return {
     src,
     alt:     document.getElementById("f_alt").value.trim(),
@@ -554,6 +704,10 @@ function openModal(type, id) {
   document.getElementById("modalTitle").textContent = id ? `Edit ${label}` : `Add ${label}`;
   document.getElementById("modalBody").innerHTML    = cfg.form(data || {});
   document.getElementById("modal").hidden           = false;
+
+  // Post-inject logic for forms that need it
+  if (type === "images")   initImageFormLogic();
+  if (type === "articles") initArticleImageLogic();
 }
 
 function closeModal() {
